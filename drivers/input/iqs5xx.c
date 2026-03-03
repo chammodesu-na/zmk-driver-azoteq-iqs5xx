@@ -4,6 +4,10 @@
  */
 
 #define DT_DRV_COMPAT azoteq_iqs5xx
+#define IQS5XX_SYS_CTRL1  0x0432
+#define IQS5XX_SUSPEND    0x01
+#define IQS5XX_RESUME     0x00
+#define IQS5XX_END_COMM   0xEEEE
 
 #include <stdlib.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
@@ -13,6 +17,7 @@
 #include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
 
 #include "iqs5xx.h"
 
@@ -324,6 +329,36 @@ static int iqs5xx_setup_device(const struct device *dev) {
 
     return 0;
 }
+static int iqs5xx_write_reg(const struct device *dev, uint16_t reg, uint8_t val)
+{
+    const struct iqs5xx_config *cfg = dev->config;
+    uint8_t buf[5] = {
+        (reg >> 8) & 0xFF,
+        (reg >> 0) & 0xFF,
+        val,
+        (IQS5XX_END_COMM >> 8) & 0xFF,
+        (IQS5XX_END_COMM >> 0) & 0xFF,
+    };
+    return i2c_write_dt(&cfg->i2c, buf, sizeof(buf));
+}
+
+static int iqs5xx_pm_action(const struct device *dev, enum pm_device_action action)
+{
+    int ret = 0;
+    switch (action) {
+    case PM_DEVICE_ACTION_SUSPEND:
+        ret = iqs5xx_write_reg(dev, IQS5XX_SYS_CTRL1, IQS5XX_SUSPEND);
+        if (ret < 0) { ret = 0; }
+        break;
+    case PM_DEVICE_ACTION_RESUME:
+        ret = iqs5xx_write_reg(dev, IQS5XX_SYS_CTRL1, IQS5XX_RESUME);
+        if (ret < 0) { ret = 0; }
+        break;
+    default:
+        return -ENOTSUP;
+    }
+    return ret;
+}
 
 static int iqs5xx_init(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
@@ -420,7 +455,8 @@ static int iqs5xx_init(const struct device *dev) {
         .bottom_beta = DT_INST_PROP_OR(n, bottom_beta, 5),                                         \
         .stationary_threshold = DT_INST_PROP_OR(n, stationary_threshold, 5),                       \
     };                                                                                             \
-    DEVICE_DT_INST_DEFINE(n, iqs5xx_init, NULL, &iqs5xx_data_##n, &iqs5xx_config_##n, POST_KERNEL, \
+    PM_DEVICE_DT_INST_DEFINE(n, iqs5xx_pm_action); \
+    DEVICE_DT_INST_DEFINE(n, iqs5xx_init, PM_DEVICE_DT_INST_GET(n), &iqs5xx_data_##n, &iqs5xx_config_##n, POST_KERNEL, \
                           CONFIG_INPUT_INIT_PRIORITY, NULL);
 
 DT_INST_FOREACH_STATUS_OKAY(IQS5XX_INIT)
