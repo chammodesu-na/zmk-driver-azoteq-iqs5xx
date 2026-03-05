@@ -329,35 +329,40 @@ static int iqs5xx_setup_device(const struct device *dev) {
 
     return 0;
 }
-static int iqs5xx_write_reg(const struct device *dev, uint16_t reg, uint8_t val)
-{
-    const struct iqs5xx_config *cfg = dev->config;
-    uint8_t buf[5] = {
-        (reg >> 8) & 0xFF,
-        (reg >> 0) & 0xFF,
-        val,
-        (IQS5XX_END_COMM >> 8) & 0xFF,
-        (IQS5XX_END_COMM >> 0) & 0xFF,
-    };
-    return i2c_write_dt(&cfg->i2c, buf, sizeof(buf));
-}
+
 
 static int iqs5xx_pm_action(const struct device *dev, enum pm_device_action action)
 {
-    int ret = 0;
+    const struct iqs5xx_config *config = dev->config;
+    struct iqs5xx_data *data = dev->data;
+
+    if (!config->reset_gpio.port) {
+        return -ENOTSUP;
+    }
+
     switch (action) {
     case PM_DEVICE_ACTION_SUSPEND:
-        ret = iqs5xx_write_reg(dev, IQS5XX_SYS_CTRL1, IQS5XX_SUSPEND);
-        if (ret < 0) { ret = 0; }
+        // RDY 인터럽트 비활성화 (슬립 중 워크 큐 실행 방지)
+        gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_DISABLE);
+        // reset 핀 LOW → 칩 강제 리셋 상태로 고정 (전류 차단)
+        gpio_pin_set_dt(&config->reset_gpio, 1);
         break;
+
     case PM_DEVICE_ACTION_RESUME:
-        ret = iqs5xx_write_reg(dev, IQS5XX_SYS_CTRL1, IQS5XX_RESUME);
-        if (ret < 0) { ret = 0; }
+        // reset 핀 해제 → 칩 재부팅
+        gpio_pin_set_dt(&config->reset_gpio, 0);
+        k_msleep(10);
+        // 칩 재설정
+        iqs5xx_setup_device(dev);
+        // RDY 인터럽트 재활성화
+        gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_EDGE_RISING);
         break;
+
     default:
         return -ENOTSUP;
     }
-    return ret;
+
+    return 0;
 }
 
 static int iqs5xx_init(const struct device *dev) {
