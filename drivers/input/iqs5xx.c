@@ -18,7 +18,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
-#include <zmk,events,activity_state_changed.h>
+#include <zmk/events/activity_state_changed.h>
 #include "iqs5xx.h"
 
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
