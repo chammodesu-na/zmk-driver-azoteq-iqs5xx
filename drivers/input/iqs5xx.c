@@ -4,10 +4,6 @@
  */
 
 #define DT_DRV_COMPAT azoteq_iqs5xx
-#define IQS5XX_SYS_CTRL1  0x0432
-#define IQS5XX_SUSPEND    0x01
-#define IQS5XX_RESUME     0x00
-#define IQS5XX_END_COMM   0xEEEE
 
 #include <stdlib.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
@@ -18,9 +14,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
-#include <zmk/events/activity_state_changed.h>
+#include <zephyr/pm/pm.h>
 #include "iqs5xx.h"
-#include <zmk/event_manager.h>
 
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 
@@ -71,14 +66,10 @@ static void iqs5xx_button_release_work_handler(struct k_work *work) {
     struct k_work_delayable *dwork = k_work_delayable_from_work(work);
     struct iqs5xx_data *data = CONTAINER_OF(dwork, struct iqs5xx_data, button_release_work);
 
-    // TODO: This loop should only deactivate one button.
-    // Log a warning when that is not the case.
     for (int i = 0; i < 3; i++) {
         LOG_INF("Releasing synthetic button");
         if (data->buttons_pressed & BIT(i)) {
             input_report_key(data->dev, INPUT_BTN_0 + i, 0, true, K_FOREVER);
-            // Turn off the bit.
-            // NOTE: This is a potential race.
             data->buttons_pressed &= ~BIT(i);
         }
     }
@@ -91,7 +82,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
     uint8_t sys_info_0, sys_info_1, gesture_events_0, gesture_events_1, num_fingers;
     int ret;
 
-    // Read system info registers.
     ret = iqs5xx_read_reg8(dev, IQS5XX_SYSTEM_INFO_0, &sys_info_0);
     if (ret < 0) {
         LOG_ERR("Failed to read system info 0: %d", ret);
@@ -116,10 +106,8 @@ static void iqs5xx_work_handler(struct k_work *work) {
         goto end_comm;
     }
 
-    // Handle reset indication.
     if (sys_info_0 & IQS5XX_SHOW_RESET) {
         LOG_INF("Device reset detected");
-        // Acknowledge reset.
         iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONTROL_0, IQS5XX_ACK_RESET);
         goto end_comm;
     }
@@ -127,7 +115,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
     bool tp_movement = (sys_info_1 & IQS5XX_TP_MOVEMENT) != 0;
     bool scroll = (gesture_events_1 & IQS5XX_SCROLL) != 0;
     if (!scroll) {
-        // Clear accumulators if we're not actively scrolling.
         data->scroll_x_acc = 0;
         data->scroll_y_acc = 0;
     }
@@ -160,10 +147,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
         }
     }
 
-    // Handle movement and gestures.
-    //
-    // Each one of these branches needs to send the last report it makes as
-    // sync to ensure that the input subsystem processes things in order.
     if (hold_became_active) {
         LOG_INF("Hold became active");
         input_report_key(dev, LEFT_BUTTON_CODE, 1, true, K_FOREVER);
@@ -173,23 +156,14 @@ static void iqs5xx_work_handler(struct k_work *work) {
         input_report_key(dev, LEFT_BUTTON_CODE, 0, true, K_FOREVER);
         data->active_hold = false;
     } else if (button_pressed) {
-        // Cancel any pending release.
         k_work_cancel_delayable(&data->button_release_work);
-
-        // Press the button immediately.
         input_report_key(dev, button_code, 1, true, K_FOREVER);
         data->buttons_pressed |= BIT(button_code - INPUT_BTN_0);
-
-        // Schedule release after 100ms.
         k_work_schedule(&data->button_release_work, K_MSEC(100));
     } else if (scroll) {
-        // TODO: Expose this divisor.
         int16_t scroll_div = 32;
 
-        // Only one scrolling direction is valid at a time.
-        // End the communication right after reporting the movement.
         if (rel_x != 0) {
-            // By default the x axis is already "natural".
             if (!config->natural_scroll_x) {
                 rel_x *= -1;
             }
@@ -211,7 +185,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
                                  K_FOREVER);
                 data->scroll_y_acc %= scroll_div;
             }
-
             goto end_comm;
         }
     } else if (tp_movement) {
@@ -228,7 +201,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
     }
 
 end_comm:
-    // End communication window.
     iqs5xx_end_comm_window(dev);
 }
 
@@ -243,7 +215,6 @@ static int iqs5xx_setup_device(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
     int ret;
 
-    // Enable event mode and trackpad events.
     ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_1,
                             IQS5XX_EVENT_MODE | IQS5XX_TP_EVENT | IQS5XX_GESTURE_EVENT);
     if (ret < 0) {
@@ -263,12 +234,6 @@ static int iqs5xx_setup_device(const struct device *dev) {
         return ret;
     }
 
-    // TODO: Expose these through dts bindings.
-    // Set filter settings with:
-    // - IIR filter enabled
-    // - MAV filter enabled
-    // - IIR select disabled (dynamic IIR)
-    // - ALP count filter enabled
     ret = iqs5xx_write_reg8(dev, IQS5XX_FILTER_SETTINGS,
                             IQS5XX_IIR_FILTER | IQS5XX_MAV_FILTER | IQS5XX_ALP_COUNT_FILTER);
     if (ret < 0) {
@@ -279,14 +244,12 @@ static int iqs5xx_setup_device(const struct device *dev) {
     uint8_t single_finger_gestures = 0;
     single_finger_gestures |= config->one_finger_tap ? IQS5XX_SINGLE_TAP : 0;
     single_finger_gestures |= config->press_and_hold ? IQS5XX_PRESS_AND_HOLD : 0;
-    // Configure single finger gestures.
     ret = iqs5xx_write_reg8(dev, IQS5XX_SINGLE_FINGER_GESTURES_CONF, single_finger_gestures);
     if (ret < 0) {
         LOG_ERR("Failed to configure single finger gestures: %d", ret);
         return ret;
     }
 
-    // Configure the hold time for the press and hold gesture.
     ret = iqs5xx_write_reg16(dev, IQS5XX_HOLD_TIME, config->press_and_hold_time);
     if (ret < 0) {
         LOG_ERR("Failed to configure the hold time: %d", ret);
@@ -296,14 +259,12 @@ static int iqs5xx_setup_device(const struct device *dev) {
     uint8_t two_finger_gestures = 0;
     two_finger_gestures |= config->two_finger_tap ? IQS5XX_TWO_FINGER_TAP : 0;
     two_finger_gestures |= config->scroll ? IQS5XX_SCROLL : 0;
-    // Configure multi finger gestures.
     ret = iqs5xx_write_reg8(dev, IQS5XX_MULTI_FINGER_GESTURES_CONF, two_finger_gestures);
     if (ret < 0) {
         LOG_ERR("Failed to configure multi finger gestures: %d", ret);
         return ret;
     }
 
-    // Configure axes.
     uint8_t xy_config = 0;
     xy_config |= config->flip_x ? IQS5XX_FLIP_X : 0;
     xy_config |= config->flip_y ? IQS5XX_FLIP_Y : 0;
@@ -314,14 +275,12 @@ static int iqs5xx_setup_device(const struct device *dev) {
         return ret;
     }
 
-    // Configure system settings.
     ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_0, IQS5XX_SETUP_COMPLETE | IQS5XX_WDT);
     if (ret < 0) {
         LOG_ERR("Failed to configure system: %d", ret);
         return ret;
     }
 
-    // End communication window.
     ret = iqs5xx_end_comm_window(dev);
     if (ret < 0) {
         LOG_ERR("Failed to end comm window during initialization: %d", ret);
@@ -331,11 +290,9 @@ static int iqs5xx_setup_device(const struct device *dev) {
     return 0;
 }
 
-
 static int iqs5xx_pm_action(const struct device *dev, enum pm_device_action action)
 {
     const struct iqs5xx_config *config = dev->config;
-    struct iqs5xx_data *data = dev->data;
 
     if (!config->reset_gpio.port) {
         return -ENOTSUP;
@@ -343,19 +300,14 @@ static int iqs5xx_pm_action(const struct device *dev, enum pm_device_action acti
 
     switch (action) {
     case PM_DEVICE_ACTION_SUSPEND:
-        // RDY 인터럽트 비활성화 (슬립 중 워크 큐 실행 방지)
         gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_DISABLE);
-        // reset 핀 LOW → 칩 강제 리셋 상태로 고정 (전류 차단)
         gpio_pin_set_dt(&config->reset_gpio, 1);
         break;
 
     case PM_DEVICE_ACTION_RESUME:
-        // reset 핀 해제 → 칩 재부팅
         gpio_pin_set_dt(&config->reset_gpio, 0);
         k_msleep(100);
-        // 칩 재설정
         iqs5xx_setup_device(dev);
-        // RDY 인터럽트 재활성화
         gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_EDGE_RISING);
         break;
 
@@ -366,29 +318,36 @@ static int iqs5xx_pm_action(const struct device *dev, enum pm_device_action acti
     return 0;
 }
 
-static int iqs5xx_activity_event_handler(const zmk_event_t *eh) {
-    const struct zmk_activity_state_changed *ev = as_zmk_activity_state_changed(eh);
+/*
+ * PM notifier: System OFF(딥슬립) 진입 직전 호출됨.
+ * nRF52840은 System OFF 중 GPIO 출력 레벨을 latch로 유지하므로,
+ * 여기서 reset 핀을 assert(물리적 LOW)하면 칩이 리셋 상태로 고정됨.
+ * 웨이크업은 완전 재부팅이므로 iqs5xx_init()이 자동 재실행 → resume 불필요.
+ *
+ * 주의: state_entry는 스케줄러 잠금 상태에서 호출됨.
+ *       GPIO 레지스터 쓰기만 가능, k_msleep() 등 블로킹 호출 금지.
+ */
+static void iqs5xx_pm_state_entry(enum pm_state state)
+{
+    if (state != PM_STATE_SOFT_OFF) {
+        return;
+    }
+
     const struct device *dev = DEVICE_DT_INST_GET(0);
     const struct iqs5xx_config *config = dev->config;
 
     if (!config->reset_gpio.port) {
-        return 0;
+        return;
     }
 
-    if (ev->state == ZMK_ACTIVITY_SLEEP) {
-        gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_DISABLE);
-        gpio_pin_set_dt(&config->reset_gpio, 1); // 칩 강제 리셋 고정
-    } else if (ev->state == ZMK_ACTIVITY_ACTIVE) {
-        gpio_pin_set_dt(&config->reset_gpio, 0); // 칩 재기동
-        k_msleep(10);
-        iqs5xx_setup_device(dev);
-        gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_EDGE_RISING);
-    }
-    return 0;
+    gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_DISABLE);
+    gpio_pin_set_dt(&config->reset_gpio, 1); /* 물리적 LOW → IQS5XX 리셋 고정 */
 }
 
-ZMK_LISTENER(iqs5xx, iqs5xx_activity_event_handler);
-ZMK_SUBSCRIPTION(iqs5xx, zmk_activity_state_changed);
+static struct pm_notifier iqs5xx_pm_notifier = {
+    .state_entry = iqs5xx_pm_state_entry,
+    .state_exit  = NULL,
+};
 
 static int iqs5xx_init(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
@@ -404,7 +363,6 @@ static int iqs5xx_init(const struct device *dev) {
     k_work_init(&data->work, iqs5xx_work_handler);
     k_work_init_delayable(&data->button_release_work, iqs5xx_button_release_work_handler);
 
-    // Configure reset GPIO if available.
     if (config->reset_gpio.port) {
         if (!gpio_is_ready_dt(&config->reset_gpio)) {
             LOG_ERR("Reset GPIO not ready");
@@ -417,14 +375,12 @@ static int iqs5xx_init(const struct device *dev) {
             return ret;
         }
 
-        // Reset the device.
         gpio_pin_set_dt(&config->reset_gpio, 1);
         k_msleep(1);
         gpio_pin_set_dt(&config->reset_gpio, 0);
         k_msleep(10);
     }
 
-    // Configure RDY GPIO.
     if (!gpio_is_ready_dt(&config->rdy_gpio)) {
         LOG_ERR("RDY GPIO not ready");
         return -ENODEV;
@@ -449,15 +405,15 @@ static int iqs5xx_init(const struct device *dev) {
         return ret;
     }
 
-    // Wait for device to be ready.
     k_msleep(100);
 
-    // Setup device configuration.
     ret = iqs5xx_setup_device(dev);
     if (ret < 0) {
         LOG_ERR("Failed to setup device: %d", ret);
         return ret;
     }
+
+    pm_notifier_register(&iqs5xx_pm_notifier);
 
     data->initialized = true;
     LOG_INF("IQS5xx trackpad initialized");
@@ -465,7 +421,6 @@ static int iqs5xx_init(const struct device *dev) {
     return 0;
 }
 
-// Replace CONFIG_INPUT_INIT_PRIORITY with the azoteq specific value.
 #define IQS5XX_INIT(n)                                                                             \
     static struct iqs5xx_data iqs5xx_data_##n;                                                     \
     static const struct iqs5xx_config iqs5xx_config_##n = {                                        \
@@ -485,8 +440,9 @@ static int iqs5xx_init(const struct device *dev) {
         .bottom_beta = DT_INST_PROP_OR(n, bottom_beta, 5),                                         \
         .stationary_threshold = DT_INST_PROP_OR(n, stationary_threshold, 5),                       \
     };                                                                                             \
-    PM_DEVICE_DT_INST_DEFINE(n, iqs5xx_pm_action); \
-    DEVICE_DT_INST_DEFINE(n, iqs5xx_init, PM_DEVICE_DT_INST_GET(n), &iqs5xx_data_##n, &iqs5xx_config_##n, POST_KERNEL, \
+    PM_DEVICE_DT_INST_DEFINE(n, iqs5xx_pm_action);                                                \
+    DEVICE_DT_INST_DEFINE(n, iqs5xx_init, PM_DEVICE_DT_INST_GET(n), &iqs5xx_data_##n,             \
+                          &iqs5xx_config_##n, POST_KERNEL,                                         \
                           CONFIG_INPUT_INIT_PRIORITY, NULL);
 
 DT_INST_FOREACH_STATUS_OKAY(IQS5XX_INIT)
