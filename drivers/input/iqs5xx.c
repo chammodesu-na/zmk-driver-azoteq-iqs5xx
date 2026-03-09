@@ -18,7 +18,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/pm/device.h>
-
+#include <zmk,events,activity_state_changed.h>
 #include "iqs5xx.h"
 
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
@@ -351,7 +351,7 @@ static int iqs5xx_pm_action(const struct device *dev, enum pm_device_action acti
     case PM_DEVICE_ACTION_RESUME:
         // reset 핀 해제 → 칩 재부팅
         gpio_pin_set_dt(&config->reset_gpio, 0);
-        k_msleep(10);
+        k_msleep(100);
         // 칩 재설정
         iqs5xx_setup_device(dev);
         // RDY 인터럽트 재활성화
@@ -364,6 +364,30 @@ static int iqs5xx_pm_action(const struct device *dev, enum pm_device_action acti
 
     return 0;
 }
+
+static int iqs5xx_activity_event_handler(const zmk_event_t *eh) {
+    const struct zmk_activity_state_changed *ev = as_zmk_activity_state_changed(eh);
+    const struct device *dev = DEVICE_DT_INST_GET(0);
+    const struct iqs5xx_config *config = dev->config;
+
+    if (!config->reset_gpio.port) {
+        return 0;
+    }
+
+    if (ev->state == ZMK_ACTIVITY_SLEEP) {
+        gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_DISABLE);
+        gpio_pin_set_dt(&config->reset_gpio, 1); ,, 칩 강제 리셋 고정
+    } else if (ev->state == ZMK_ACTIVITY_ACTIVE) {
+        gpio_pin_set_dt(&config->reset_gpio, 0); ,, 칩 재기동
+        k_msleep(10);
+        iqs5xx_setup_device(dev);
+        gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_EDGE_RISING);
+    }
+    return 0;
+}
+
+ZMK_LISTENER(iqs5xx, iqs5xx_activity_event_handler);
+ZMK_SUBSCRIPTION(iqs5xx, zmk_activity_state_changed);
 
 static int iqs5xx_init(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
