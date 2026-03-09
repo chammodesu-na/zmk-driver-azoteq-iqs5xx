@@ -20,6 +20,7 @@
 #include <zephyr/pm/device.h>
 #include <zmk/events/activity_state_changed.h>
 #include "iqs5xx.h"
+#include <zmk/event_manager.h>
 
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 
@@ -376,9 +377,9 @@ static int iqs5xx_activity_event_handler(const zmk_event_t *eh) {
 
     if (ev->state == ZMK_ACTIVITY_SLEEP) {
         gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_DISABLE);
-        gpio_pin_set_dt(&config->reset_gpio, 1); ,, 칩 강제 리셋 고정
+        gpio_pin_set_dt(&config->reset_gpio, 1); // 칩 강제 리셋 고정
     } else if (ev->state == ZMK_ACTIVITY_ACTIVE) {
-        gpio_pin_set_dt(&config->reset_gpio, 0); ,, 칩 재기동
+        gpio_pin_set_dt(&config->reset_gpio, 0); // 칩 재기동
         k_msleep(10);
         iqs5xx_setup_device(dev);
         gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_EDGE_RISING);
