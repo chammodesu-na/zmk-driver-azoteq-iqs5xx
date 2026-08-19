@@ -19,33 +19,11 @@
 
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 
-static int iqs5xx_read_reg16(const struct device *dev, uint16_t reg, uint16_t *val) {
-    const struct iqs5xx_config *config = dev->config;
-    uint8_t buf[2];
-    uint8_t reg_buf[2] = {reg >> 8, reg & 0xFF};
-    int ret;
-
-    ret = i2c_write_read_dt(&config->i2c, reg_buf, sizeof(reg_buf), buf, sizeof(buf));
-    if (ret < 0) {
-        return ret;
-    }
-
-    *val = (buf[0] << 8) | buf[1];
-    return 0;
-}
-
 static int iqs5xx_write_reg16(const struct device *dev, uint16_t reg, uint16_t val) {
     const struct iqs5xx_config *config = dev->config;
     uint8_t buf[4] = {reg >> 8, reg & 0xFF, val >> 8, val & 0xFF};
 
     return i2c_write_dt(&config->i2c, buf, sizeof(buf));
-}
-
-static int iqs5xx_read_reg8(const struct device *dev, uint16_t reg, uint8_t *val) {
-    const struct iqs5xx_config *config = dev->config;
-    uint8_t reg_buf[2] = {reg >> 8, reg & 0xFF};
-
-    return i2c_write_read_dt(&config->i2c, reg_buf, sizeof(reg_buf), val, 1);
 }
 
 static int iqs5xx_write_reg8(const struct device *dev, uint16_t reg, uint8_t val) {
