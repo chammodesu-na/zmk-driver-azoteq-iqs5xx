@@ -8,6 +8,36 @@
 #define IQS5XX_TOUCH_STRENGTH 0x001A // 2 bytes.
 #define IQS5XX_TOUCH_AREA 0x001C
 
+// Contiguous status block, read in a single burst transaction.
+// 0x000D GestureEvents0, 0x000E GestureEvents1, 0x000F SystemInfo0,
+// 0x0010 SystemInfo1, 0x0011 NumFingers, 0x0012 RelX (2), 0x0014 RelY (2).
+#define IQS5XX_BASE_DATA 0x000D
+#define IQS5XX_BASE_DATA_LEN 9
+#define IQS5XX_BD_GESTURE_EVENTS_0 0
+#define IQS5XX_BD_GESTURE_EVENTS_1 1
+#define IQS5XX_BD_SYSTEM_INFO_0 2
+#define IQS5XX_BD_SYSTEM_INFO_1 3
+#define IQS5XX_BD_NUM_FINGERS 4
+#define IQS5XX_BD_REL_X 5
+#define IQS5XX_BD_REL_Y 7
+
+// Report rate of each power mode, in ms. 2 registers wide each.
+#define IQS5XX_ACTIVE_REPORT_RATE 0x057A
+#define IQS5XX_IDLE_TOUCH_REPORT_RATE 0x057C
+#define IQS5XX_IDLE_REPORT_RATE 0x057E
+#define IQS5XX_LP1_REPORT_RATE 0x0580
+#define IQS5XX_LP2_REPORT_RATE 0x0582
+
+// Time spent in each power mode before stepping down to the next one, in
+// seconds. Writing IQS5XX_TIMEOUT_DISABLED keeps the device in that mode
+// indefinitely.
+#define IQS5XX_ACTIVE_MODE_TIMEOUT 0x0584
+#define IQS5XX_IDLE_TOUCH_TIMEOUT 0x0585
+#define IQS5XX_IDLE_TIMEOUT 0x0586
+#define IQS5XX_LP1_TIMEOUT 0x0587
+
+#define IQS5XX_TIMEOUT_DISABLED 255
+
 #define IQS5XX_BOTTOM_BETA 0x0637
 #define IQS5XX_STATIONARY_THRESH 0x0672
 
@@ -57,6 +87,8 @@
 #define IQS5XX_ALP_ATI_ERROR BIT(5)
 #define IQS5XX_REATI_OCCURRED BIT(4)
 #define IQS5XX_ATI_ERROR BIT(3)
+// Bits 2:0 report the power mode the device is currently in.
+#define IQS5XX_CHARGING_MODE_MASK 0x07
 
 #define IQS5XX_SYSTEM_INFO_1 0x0010
 // System Info 1 bits.
@@ -135,6 +167,20 @@ struct iqs5xx_config {
     // Sensitivity. configuration.
     uint8_t bottom_beta;
     uint8_t stationary_threshold;
+
+    // Power mode configuration.
+    uint16_t active_report_rate;
+    uint16_t idle_touch_report_rate;
+    uint16_t idle_report_rate;
+    uint16_t lp1_report_rate;
+    uint16_t lp2_report_rate;
+    uint8_t active_mode_timeout;
+    uint8_t idle_touch_timeout;
+    uint8_t idle_timeout;
+    uint8_t lp1_timeout;
+
+    // Report finger presence as an INPUT_BTN_TOUCH key event.
+    bool report_touch_state;
 };
 
 struct iqs5xx_data {
@@ -147,6 +193,8 @@ struct iqs5xx_data {
     // Flag to indicate if the button was pressed in a previous cycle.
     uint8_t buttons_pressed;
     bool active_hold;
+    // Whether at least one finger was on the trackpad in the previous cycle.
+    bool touching;
     // Scroll accumulators.
     int16_t scroll_x_acc;
     int16_t scroll_y_acc;
