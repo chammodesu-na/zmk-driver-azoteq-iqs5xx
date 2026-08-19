@@ -61,3 +61,75 @@ properties:
     description: |
       How far a finger must move (in pixels) to not be considered stationary.
     default: 5
+
+  report-touch-state:
+    type: boolean
+    description: |
+      Report finger presence on the trackpad as an INPUT_BTN_TOUCH key event:
+      value 1 as soon as the first finger lands, value 0 as soon as the last
+      one lifts. Combined with a zmk,input-processor-behaviors node this lets a
+      layer stay active for exactly as long as a finger is on the pad.
+      Also enables the device's TOUCH_EVENT so a finger that lands and rests,
+      or lifts without moving, still opens a communication window.
+
+  active-report-rate-ms:
+    type: int
+    description: "Scan interval, in ms, while a finger is actively moving."
+    default: 10
+
+  idle-touch-report-rate-ms:
+    type: int
+    description: |
+      Scan interval, in ms, while a finger rests on the pad without moving.
+      The device enters this mode after active-mode-timeout-s.
+    default: 10
+
+  idle-report-rate-ms:
+    type: int
+    description: |
+      Scan interval, in ms, while no finger is on the pad. This is the latency
+      you pay when you put a finger back down, so keep it low if the trackpad
+      feels asleep when you return to it.
+    default: 20
+
+  lp1-report-rate-ms:
+    type: int
+    description: "Scan interval, in ms, in the first low power mode."
+    default: 50
+
+  lp2-report-rate-ms:
+    type: int
+    description: "Scan interval, in ms, in the deepest low power mode."
+    default: 100
+
+  active-mode-timeout-s:
+    type: int
+    description: |
+      How long a finger may rest without moving before the device steps down
+      from active to idle-touch mode. 255 disables the transition.
+    default: 10
+
+  idle-touch-timeout-s:
+    type: int
+    description: |
+      How long a stationary finger is tolerated in idle-touch mode before the
+      device treats it as stuck and reseeds. 255 disables the transition.
+    default: 255
+
+  idle-timeout-s:
+    type: int
+    description: |
+      How long the device stays in idle mode before stepping down to LP1 and
+      then LP2, where the scan rate drops far enough that the trackpad feels
+      asleep until it wakes up again. The default of 255 disables the step
+      down entirely, so the pad stays instantly responsive for as long as the
+      board is awake. Set it to a small value (e.g. 5) to trade that
+      responsiveness back for battery life.
+    default: 255
+
+  lp1-timeout-s:
+    type: int
+    description: |
+      How long the device stays in LP1 before stepping down to LP2. Has no
+      effect while idle-timeout-s is 255. 255 disables the transition.
+    default: 10

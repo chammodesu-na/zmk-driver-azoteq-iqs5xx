@@ -55,6 +55,13 @@ static int iqs5xx_write_reg8(const struct device *dev, uint16_t reg, uint8_t val
     return i2c_write_dt(&config->i2c, buf, sizeof(buf));
 }
 
+static int iqs5xx_read_burst(const struct device *dev, uint16_t reg, uint8_t *buf, size_t len) {
+    const struct iqs5xx_config *config = dev->config;
+    uint8_t reg_buf[2] = {reg >> 8, reg & 0xFF};
+
+    return i2c_write_read_dt(&config->i2c, reg_buf, sizeof(reg_buf), buf, len);
+}
+
 static int iqs5xx_end_comm_window(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
     uint8_t buf[3] = {IQS5XX_END_COMM_WINDOW >> 8, IQS5XX_END_COMM_WINDOW & 0xFF, 0x00};
@@ -62,13 +69,15 @@ static int iqs5xx_end_comm_window(const struct device *dev) {
     return i2c_write_dt(&config->i2c, buf, sizeof(buf));
 }
 
+static int iqs5xx_setup_device(const struct device *dev);
+
 static void iqs5xx_button_release_work_handler(struct k_work *work) {
     struct k_work_delayable *dwork = k_work_delayable_from_work(work);
     struct iqs5xx_data *data = CONTAINER_OF(dwork, struct iqs5xx_data, button_release_work);
 
     for (int i = 0; i < 3; i++) {
-        LOG_INF("Releasing synthetic button");
         if (data->buttons_pressed & BIT(i)) {
+            LOG_DBG("Releasing synthetic button %d", i);
             input_report_key(data->dev, INPUT_BTN_0 + i, 0, true, K_FOREVER);
             data->buttons_pressed &= ~BIT(i);
         }
@@ -79,37 +88,54 @@ static void iqs5xx_work_handler(struct k_work *work) {
     struct iqs5xx_data *data = CONTAINER_OF(work, struct iqs5xx_data, work);
     const struct device *dev = data->dev;
     const struct iqs5xx_config *config = dev->config;
-    uint8_t sys_info_0, sys_info_1, gesture_events_0, gesture_events_1, num_fingers;
+    uint8_t base_data[IQS5XX_BASE_DATA_LEN];
     int ret;
 
-    ret = iqs5xx_read_reg8(dev, IQS5XX_SYSTEM_INFO_0, &sys_info_0);
+    // The status registers are contiguous, so a single burst read gives us a
+    // coherent snapshot of the cycle. Reading them one at a time both costs
+    // several I2C transactions per report and can straddle two report cycles.
+    ret = iqs5xx_read_burst(dev, IQS5XX_BASE_DATA, base_data, sizeof(base_data));
     if (ret < 0) {
-        LOG_ERR("Failed to read system info 0: %d", ret);
+        LOG_ERR("Failed to read base data: %d", ret);
         goto end_comm;
     }
 
-    ret = iqs5xx_read_reg8(dev, IQS5XX_SYSTEM_INFO_1, &sys_info_1);
-    if (ret < 0) {
-        LOG_ERR("Failed to read system info 1: %d", ret);
-        goto end_comm;
-    }
-
-    ret = iqs5xx_read_reg8(dev, IQS5XX_GESTURE_EVENTS_0, &gesture_events_0);
-    if (ret < 0) {
-        LOG_ERR("Failed to read gesture events: %d", ret);
-        goto end_comm;
-    }
-
-    ret = iqs5xx_read_reg8(dev, IQS5XX_GESTURE_EVENTS_1, &gesture_events_1);
-    if (ret < 0) {
-        LOG_ERR("Failed to read gesture events 1: %d", ret);
-        goto end_comm;
-    }
+    uint8_t gesture_events_0 = base_data[IQS5XX_BD_GESTURE_EVENTS_0];
+    uint8_t gesture_events_1 = base_data[IQS5XX_BD_GESTURE_EVENTS_1];
+    uint8_t sys_info_0 = base_data[IQS5XX_BD_SYSTEM_INFO_0];
+    uint8_t sys_info_1 = base_data[IQS5XX_BD_SYSTEM_INFO_1];
+    uint8_t num_fingers = base_data[IQS5XX_BD_NUM_FINGERS];
+    int16_t rel_x = (int16_t)((base_data[IQS5XX_BD_REL_X] << 8) | base_data[IQS5XX_BD_REL_X + 1]);
+    int16_t rel_y = (int16_t)((base_data[IQS5XX_BD_REL_Y] << 8) | base_data[IQS5XX_BD_REL_Y + 1]);
 
     if (sys_info_0 & IQS5XX_SHOW_RESET) {
-        LOG_INF("Device reset detected");
+        // A reset (the watchdog, or a brown-out) drops the device back to its
+        // defaults, so acknowledging it is not enough: everything configured at
+        // init has to be written again or the trackpad silently comes back with
+        // stock gestures, axes and report rates.
+        LOG_INF("Device reset detected, reapplying configuration");
         iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONTROL_0, IQS5XX_ACK_RESET);
-        goto end_comm;
+
+        if (data->touching) {
+            data->touching = false;
+            if (config->report_touch_state) {
+                input_report_key(dev, INPUT_BTN_TOUCH, 0, true, K_FOREVER);
+            }
+        }
+
+        // iqs5xx_setup_device() ends the communication window itself.
+        iqs5xx_setup_device(dev);
+        return;
+    }
+
+    // Finger presence is reported before the gesture branches below, all of
+    // which can jump straight to end_comm. Doing it here means the layer a
+    // touch activates goes down on the very first cycle the finger lands and
+    // comes back up on the first cycle after it lifts.
+    bool touching = num_fingers > 0;
+    if (config->report_touch_state && touching != data->touching) {
+        data->touching = touching;
+        input_report_key(dev, INPUT_BTN_TOUCH, touching ? 1 : 0, true, K_FOREVER);
     }
 
     bool tp_movement = (sys_info_1 & IQS5XX_TP_MOVEMENT) != 0;
@@ -131,21 +157,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
 
     bool hold_became_active = (gesture_events_0 & IQS5XX_PRESS_AND_HOLD) && !data->active_hold;
     bool hold_released = !(gesture_events_0 & IQS5XX_PRESS_AND_HOLD) && data->active_hold;
-
-    int16_t rel_x, rel_y;
-    if (tp_movement || scroll) {
-        ret = iqs5xx_read_reg16(dev, IQS5XX_REL_X, (uint16_t *)&rel_x);
-        if (ret < 0) {
-            LOG_ERR("Failed to read relative X: %d", ret);
-            goto end_comm;
-        }
-
-        ret = iqs5xx_read_reg16(dev, IQS5XX_REL_Y, (uint16_t *)&rel_y);
-        if (ret < 0) {
-            LOG_ERR("Failed to read relative Y: %d", ret);
-            goto end_comm;
-        }
-    }
 
     if (hold_became_active) {
         LOG_INF("Hold became active");
@@ -188,12 +199,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
             goto end_comm;
         }
     } else if (tp_movement) {
-        ret = iqs5xx_read_reg8(dev, IQS5XX_NUM_FINGERS, &num_fingers);
-        if (ret < 0) {
-            LOG_ERR("Failed to read number of fingers: %d", ret);
-            goto end_comm;
-        }
-
         if (rel_x != 0 || rel_y != 0) {
             input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
             input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
@@ -211,14 +216,75 @@ static void iqs5xx_rdy_handler(const struct device *port, struct gpio_callback *
     k_work_submit(&data->work);
 }
 
+// Report rate and dwell time of each power mode. The device steps down
+// Active -> Idle-Touch / Idle -> LP1 -> LP2 on its own; each step down slows
+// the scan rate, which is what makes the trackpad feel asleep when you come
+// back to it. Writing IQS5XX_TIMEOUT_DISABLED to a timeout stops the device
+// from ever taking that step.
+static int iqs5xx_setup_power_modes(const struct device *dev) {
+    const struct iqs5xx_config *config = dev->config;
+    int ret;
+
+    const struct {
+        uint16_t reg;
+        uint16_t val;
+    } report_rates[] = {
+        {IQS5XX_ACTIVE_REPORT_RATE, config->active_report_rate},
+        {IQS5XX_IDLE_TOUCH_REPORT_RATE, config->idle_touch_report_rate},
+        {IQS5XX_IDLE_REPORT_RATE, config->idle_report_rate},
+        {IQS5XX_LP1_REPORT_RATE, config->lp1_report_rate},
+        {IQS5XX_LP2_REPORT_RATE, config->lp2_report_rate},
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(report_rates); i++) {
+        ret = iqs5xx_write_reg16(dev, report_rates[i].reg, report_rates[i].val);
+        if (ret < 0) {
+            LOG_ERR("Failed to set report rate at 0x%04x: %d", report_rates[i].reg, ret);
+            return ret;
+        }
+    }
+
+    const struct {
+        uint16_t reg;
+        uint8_t val;
+    } timeouts[] = {
+        {IQS5XX_ACTIVE_MODE_TIMEOUT, config->active_mode_timeout},
+        {IQS5XX_IDLE_TOUCH_TIMEOUT, config->idle_touch_timeout},
+        {IQS5XX_IDLE_TIMEOUT, config->idle_timeout},
+        {IQS5XX_LP1_TIMEOUT, config->lp1_timeout},
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(timeouts); i++) {
+        ret = iqs5xx_write_reg8(dev, timeouts[i].reg, timeouts[i].val);
+        if (ret < 0) {
+            LOG_ERR("Failed to set timeout at 0x%04x: %d", timeouts[i].reg, ret);
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
 static int iqs5xx_setup_device(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
     int ret;
 
-    ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_1,
-                            IQS5XX_EVENT_MODE | IQS5XX_TP_EVENT | IQS5XX_GESTURE_EVENT);
+    uint8_t event_mask = IQS5XX_EVENT_MODE | IQS5XX_TP_EVENT | IQS5XX_GESTURE_EVENT;
+    // Without TOUCH_EVENT the device only opens a communication window while a
+    // finger is moving, so a finger that lands and rests, or one that lifts
+    // without moving first, is never reported.
+    if (config->report_touch_state) {
+        event_mask |= IQS5XX_TOUCH_EVENT;
+    }
+
+    ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_1, event_mask);
     if (ret < 0) {
         LOG_ERR("Failed to configure event mode: %d", ret);
+        return ret;
+    }
+
+    ret = iqs5xx_setup_power_modes(dev);
+    if (ret < 0) {
         return ret;
     }
 
@@ -299,10 +365,21 @@ static int iqs5xx_pm_action(const struct device *dev, enum pm_device_action acti
     }
 
     switch (action) {
-    case PM_DEVICE_ACTION_SUSPEND:
+    case PM_DEVICE_ACTION_SUSPEND: {
         gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_DISABLE);
         gpio_pin_set_dt(&config->reset_gpio, 1);
+
+        // The device is about to stop reporting, so release the touch state
+        // rather than leaving a layer held down across the suspend.
+        struct iqs5xx_data *data = dev->data;
+        if (data->touching) {
+            data->touching = false;
+            if (config->report_touch_state) {
+                input_report_key(dev, INPUT_BTN_TOUCH, 0, true, K_FOREVER);
+            }
+        }
         break;
+    }
 
     case PM_DEVICE_ACTION_RESUME:
         gpio_pin_set_dt(&config->reset_gpio, 0);
@@ -439,6 +516,16 @@ static int iqs5xx_init(const struct device *dev) {
         .flip_y = DT_INST_PROP(n, flip_y),                                                         \
         .bottom_beta = DT_INST_PROP_OR(n, bottom_beta, 5),                                         \
         .stationary_threshold = DT_INST_PROP_OR(n, stationary_threshold, 5),                       \
+        .active_report_rate = DT_INST_PROP(n, active_report_rate_ms),                               \
+        .idle_touch_report_rate = DT_INST_PROP(n, idle_touch_report_rate_ms),                       \
+        .idle_report_rate = DT_INST_PROP(n, idle_report_rate_ms),                                   \
+        .lp1_report_rate = DT_INST_PROP(n, lp1_report_rate_ms),                                     \
+        .lp2_report_rate = DT_INST_PROP(n, lp2_report_rate_ms),                                     \
+        .active_mode_timeout = DT_INST_PROP(n, active_mode_timeout_s),                              \
+        .idle_touch_timeout = DT_INST_PROP(n, idle_touch_timeout_s),                                \
+        .idle_timeout = DT_INST_PROP(n, idle_timeout_s),                                            \
+        .lp1_timeout = DT_INST_PROP(n, lp1_timeout_s),                                              \
+        .report_touch_state = DT_INST_PROP(n, report_touch_state),                                  \
     };                                                                                             \
     PM_DEVICE_DT_INST_DEFINE(n, iqs5xx_pm_action);                                                \
     DEVICE_DT_INST_DEFINE(n, iqs5xx_init, PM_DEVICE_DT_INST_GET(n), &iqs5xx_data_##n,             \
